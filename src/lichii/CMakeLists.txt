@@ -160,6 +160,8 @@ add_executable(lichii
     configuration/input_profiles.h
     configuration/shared_widget.cpp
     configuration/shared_widget.h
+    configuration/settings_share.cpp
+    configuration/settings_share.h
     debugger/console.cpp
     debugger/console.h
     debugger/controller.cpp
