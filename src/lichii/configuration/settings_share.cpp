@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <map>
 #include <set>
+#include <string_view>
 #include <QApplication>
 #include <QByteArray>
 #include <QClipboard>
@@ -79,11 +80,15 @@ const Section* FindSection(const QString& id) {
     return nullptr;
 }
 
+QString Tr(const char* text, int n = -1);
+
+// "General settings", or "all settings" for the whole set.
 QString SectionName(const Section& section) {
-    return QCoreApplication::translate("SettingsShare", section.name);
+    const auto name = QCoreApplication::translate("SettingsShare", section.name);
+    return std::string_view{section.id} == "all" ? name : Tr("%1 settings").arg(name);
 }
 
-QString Tr(const char* text, int n = -1) {
+QString Tr(const char* text, int n) {
     return QCoreApplication::translate("SettingsShare", text, nullptr, n);
 }
 
@@ -91,7 +96,7 @@ QString Tr(const char* text, int n = -1) {
 const std::set<std::string> machine_keys{
     "vulkan_device", "output_device",  "input_device",  "device_name",
     "serial_unit",   "serial_battery", "touch_device",  "ir_sensor_device",
-    "eden_token",    "eden_username",  "gamecard_path",
+    "eden_token",    "eden_username",  "gamecard_path", "current_user",
 };
 
 bool IsShareable(const BasicSetting& setting) {
@@ -161,6 +166,8 @@ struct Plan {
 Plan MakePlan(const Decoded& code, const Section& section,
               const ConfigurationShared::Builder& builder, bool per_game) {
     Plan plan;
+    std::vector<Change> per_game_wanted;
+    std::map<const ConfigurationShared::Widget*, bool> widget_global;
     std::map<std::string, std::string> listed;
     for (const auto& entry : code.entries) {
         listed[entry.key] = entry.value;
@@ -200,17 +207,31 @@ Plan MakePlan(const Decoded& code, const Section& section,
         if (per_game) {
             const bool to_global =
                 Normalize(*setting, value) == Normalize(*setting, setting->ToStringGlobal());
-            if (to_global ? widget->ShowsGlobal()
-                          : !widget->ShowsGlobal() && current == Normalize(*setting, value)) {
-                continue;
-            }
-            plan.changes.push_back(
-                {setting, widget, current, to_global ? std::string{} : value, to_global});
+            per_game_wanted.push_back({setting, widget, current, value, to_global});
+            widget_global[widget] =
+                widget_global.try_emplace(widget, true).first->second && to_global;
             continue;
         }
         if (current != Normalize(*setting, value)) {
             plan.changes.push_back({setting, widget, current, value, false});
         }
+    }
+
+    // A paired widget (field plus checkbox) shares one restore button, so it goes global
+    // only when every setting it owns matches the global value; otherwise the other
+    // setting is staged as a custom value equal to the global one.
+    for (auto& change : per_game_wanted) {
+        const bool to_global = widget_global[change.widget];
+        const auto target = Normalize(*change.setting, change.new_value);
+        if (to_global ? change.widget->ShowsGlobal()
+                      : !change.widget->ShowsGlobal() && change.old_value == target) {
+            continue;
+        }
+        change.to_global = to_global;
+        if (to_global) {
+            change.new_value.clear();
+        }
+        plan.changes.push_back(std::move(change));
     }
 
     for (const auto& [key, value] : listed) {
@@ -241,7 +262,7 @@ void CopyCode(QWidget* parent, const Section& section, const DialogHooks& hooks)
     QApplication::clipboard()->setText(code);
 
     QMessageBox box(QMessageBox::Information, Tr("Settings code copied"),
-                    Tr("The %1 code is on the clipboard. Pasting it sets every %1 setting to what "
+                    Tr("The %1 code is on the clipboard. Pasting it sets those settings to what "
                        "you have now.")
                         .arg(SectionName(section)),
                     QMessageBox::Ok, parent);
@@ -287,18 +308,17 @@ void PasteCode(QDialog* dialog, const DialogHooks& hooks) {
     }
 
     if (plan.changes.empty()) {
-        QMessageBox box(QMessageBox::Information, Tr("Paste settings code"),
-                        Tr("Nothing to change: your %1 settings already match this code.")
-                            .arg(SectionName(*section)),
-                        QMessageBox::Ok, dialog);
+        QMessageBox box(
+            QMessageBox::Information, Tr("Paste settings code"),
+            Tr("Nothing to change: %1 already match this code.").arg(SectionName(*section)),
+            QMessageBox::Ok, dialog);
         box.setDetailedText(details.join(QLatin1Char('\n')));
         box.exec();
         return;
     }
 
     QMessageBox box(QMessageBox::Question, Tr("Paste settings code"),
-                    Tr("Set your %1 settings to match this code? %n setting(s) change.",
-                       int(plan.changes.size()))
+                    Tr("Set %1 to match this code? %n setting(s) change.", int(plan.changes.size()))
                         .arg(SectionName(*section)),
                     QMessageBox::Yes | QMessageBox::Cancel, dialog);
     QString info = Tr("Your GPU, audio devices, paths and accounts are never changed. Nothing is "
